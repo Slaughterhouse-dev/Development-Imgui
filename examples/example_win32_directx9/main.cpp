@@ -6,11 +6,18 @@
 // - Documentation        https://dearimgui.com/docs (same as your local docs/ folder).
 // - Introduction, links and more at the top of imgui.cpp
 
-#include "imgui.h"
-#include "imgui_impl_dx9.h"
-#include "imgui_impl_win32.h"
+#include "../../imgui.h"
+#include "../../backends/imgui_impl_dx9.h"
+#include "../../backends/imgui_impl_win32.h"
 #include <d3d9.h>
 #include <tchar.h>
+#include <cmath>
+
+// Smooth scrolling data
+static const float g_ScrollMultiplier = 2.0f;
+static const float g_ScrollSmoothing = 8.0f;
+static ImVec2 g_ScrollEnergy = ImVec2(0.0f, 0.0f);
+static float g_ScrollWheelAccum = 0.0f;  // Accumulated raw wheel input
 
 // Data
 static LPDIRECT3D9              g_pD3D = nullptr;
@@ -32,10 +39,12 @@ int main(int, char**)
     ImGui_ImplWin32_EnableDpiAwareness();
     float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
 
-    // Create application window
+    // Create application window (fullscreen borderless)
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), nullptr, nullptr, nullptr, nullptr, L"ImGui Example", nullptr };
     ::RegisterClassExW(&wc);
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Dear ImGui DirectX9 Example", WS_OVERLAPPEDWINDOW, 100, 100, (int)(1280 * main_scale), (int)(800 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    int screen_width = ::GetSystemMetrics(SM_CXSCREEN);
+    int screen_height = ::GetSystemMetrics(SM_CYSCREEN);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"Dear ImGui DirectX9 Example", WS_POPUP, 0, 0, screen_width, screen_height, nullptr, nullptr, wc.hInstance, nullptr);
 
     // Initialize Direct3D
     if (!CreateDeviceD3D(hwnd))
@@ -86,8 +95,6 @@ int main(int, char**)
     //IM_ASSERT(font != nullptr);
 
     // Our state
-    bool show_demo_window = true;
-    bool show_another_window = false;
     ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
     // Main loop
@@ -133,42 +140,46 @@ int main(int, char**)
         // Start the Dear ImGui frame
         ImGui_ImplDX9_NewFrame();
         ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
 
-        // 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
-        if (show_demo_window)
-            ImGui::ShowDemoWindow(&show_demo_window);
-
-        // 2. Show a simple window that we create ourselves. We use a Begin/End pair to create a named window.
+        // Apply smooth scrolling (MUST be before ImGui::NewFrame())
+        // Add accumulated wheel input to scroll energy
+        if (g_ScrollWheelAccum != 0.0f)
         {
-            static float f = 0.0f;
-            static int counter = 0;
-
-            ImGui::Begin("Hello, world!");                          // Create a window called "Hello, world!" and append into it.
-
-            ImGui::Text("This is some useful text.");               // Display some text (you can use a format strings too)
-            ImGui::Checkbox("Demo Window", &show_demo_window);      // Edit bools storing our window open/close state
-            ImGui::Checkbox("Another Window", &show_another_window);
-
-            ImGui::SliderFloat("float", &f, 0.0f, 1.0f);            // Edit 1 float using a slider from 0.0f to 1.0f
-            ImGui::ColorEdit3("clear color", (float*)&clear_color); // Edit 3 floats representing a color
-
-            if (ImGui::Button("Button"))                            // Buttons return true when clicked (most widgets return true when edited/activated)
-                counter++;
-            ImGui::SameLine();
-            ImGui::Text("counter = %d", counter);
-
-            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
-            ImGui::End();
+            float wheel_input = g_ScrollWheelAccum * g_ScrollMultiplier;
+            // Immediately stop if direction changes
+            if (g_ScrollEnergy.y * wheel_input < 0.0f)
+                g_ScrollEnergy.y = 0.0f;
+            g_ScrollEnergy.y += wheel_input;
+            g_ScrollWheelAccum = 0.0f;
         }
 
-        // 3. Show another simple window.
-        if (show_another_window)
+        // Apply smooth scrolling decay
+        ImVec2 scroll_now = ImVec2(0.0f, 0.0f);
+        if (std::abs(g_ScrollEnergy.y) > 0.01f)
         {
-            ImGui::Begin("Another Window", &show_another_window);   // Pass a pointer to our bool variable (the window will have a closing button that will clear the bool when clicked)
-            ImGui::Text("Hello from another window!");
-            if (ImGui::Button("Close Me"))
-                show_another_window = false;
+            scroll_now.y = g_ScrollEnergy.y * io.DeltaTime * g_ScrollSmoothing;
+            g_ScrollEnergy.y -= scroll_now.y;
+        }
+        else
+        {
+            g_ScrollEnergy.y = 0.0f;
+        }
+        io.AddMouseWheelEvent(0.0f, scroll_now.y);
+
+        ImGui::NewFrame();
+
+        // Scroll Test Window
+        {
+            ImVec2 window_size(1200, 1050);
+            ImVec2 window_pos((io.DisplaySize.x - window_size.x) * 0.5f, (io.DisplaySize.y - window_size.y) * 0.5f);
+            ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(window_size, ImGuiCond_Always);
+            ImGui::Begin("Scroll Tester", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+            ImGui::Text("Scroll Energy: %.2f", g_ScrollEnergy.y);
+            ImGui::Text("FPS: %.1f", io.Framerate);
+            ImGui::Separator();
+            for (int i = 1; i <= 1000; i++)
+                ImGui::Text("Tester %d", i);
             ImGui::End();
         }
 
@@ -249,6 +260,14 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 // Generally you may always pass all inputs to dear imgui, and hide them from your application based on those two flags.
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // Handle mouse wheel locally for smooth scrolling
+    if (msg == WM_MOUSEWHEEL)
+    {
+        float wheel_delta = (float)GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA;
+        g_ScrollWheelAccum += wheel_delta;
+        return 0; // Don't pass to ImGui's handler, we handle it ourselves
+    }
+
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
         return true;
 
