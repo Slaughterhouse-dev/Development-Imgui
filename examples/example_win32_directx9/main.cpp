@@ -347,31 +347,21 @@ int main(int, char**)
             scroll_window_id = window->ID; // Store for debug window
             SmoothScrollState& scroll_state = g_ScrollStates[window->ID];
             
-            for (int i = 1; i <= 200; i++)
+            // Apply visual bounce offset to content
+            // Positive = at top, push content down
+            // Negative = at bottom, push content up  
+            float bounce_offset = scroll_state.overscroll_visual;
+            if (bounce_offset > 0.1f) {
+                // At top - offset content down
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + bounce_offset);
+            }
+            
+            for (int i = 1; i <= 100; i++)
                 ImGui::Text("Tester %d", i);
             
-            // Draw bounce overlay effect
-            float bounce_offset = scroll_state.overscroll_visual;
-            if (std::abs(bounce_offset) > 5.0f) {
-                ImDrawList* draw_list = ImGui::GetWindowDrawList();
-                ImVec2 win_min = window->InnerRect.Min;
-                ImVec2 win_max = window->InnerRect.Max;
-                
-                // Draw a colored overlay to show bounce effect
-                ImU32 bounce_color;
-                if (bounce_offset > 0.0f) {
-                    // At top - show effect at top
-                    float alpha = ImClamp(bounce_offset / g_MaxOverscroll, 0.0f, 0.3f);
-                    bounce_color = ImGui::GetColorU32(ImVec4(0.3f, 0.5f, 1.0f, alpha));
-                    float height = bounce_offset;
-                    draw_list->AddRectFilled(win_min, ImVec2(win_max.x, win_min.y + height), bounce_color);
-                } else {
-                    // At bottom - show effect at bottom
-                    float alpha = ImClamp(-bounce_offset / g_MaxOverscroll, 0.0f, 0.3f);
-                    bounce_color = ImGui::GetColorU32(ImVec4(0.3f, 0.5f, 1.0f, alpha));
-                    float height = -bounce_offset;
-                    draw_list->AddRectFilled(ImVec2(win_min.x, win_max.y - height), win_max, bounce_color);
-                }
+            // For bottom bounce - add extra space at end that gets "compressed"
+            if (bounce_offset < -0.1f) {
+                ImGui::Dummy(ImVec2(0, -bounce_offset));
             }
             
             // Get wheel input from ImGui (not intercepted)
