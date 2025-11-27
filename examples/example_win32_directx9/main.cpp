@@ -7,17 +7,159 @@
 // - Introduction, links and more at the top of imgui.cpp
 
 #include "../../imgui.h"
+#include "../../imgui_internal.h"
 #include "../../backends/imgui_impl_dx9.h"
 #include "../../backends/imgui_impl_win32.h"
 #include <d3d9.h>
 #include <tchar.h>
 #include <cmath>
+#include <unordered_map>
 
-// Smooth scrolling data
-static const float g_ScrollMultiplier = 2.0f;
-static const float g_ScrollSmoothing = 8.0f;
-static ImVec2 g_ScrollEnergy = ImVec2(0.0f, 0.0f);
-static float g_ScrollWheelAccum = 0.0f;  // Accumulated raw wheel input
+// Smooth scrolling settings
+static const float g_ScrollMultiplier = 15.0f;     // Scroll speed multiplier (higher = faster)
+static const float g_ScrollSmoothing = 6.0f;       // Scroll decay speed (lower = longer glide)
+static const float g_BounceStrength = 0.3f;        // Bounce elasticity (0-1)
+static const float g_BounceDecay = 10.0f;          // Bounce return speed
+static const float g_MaxOverscroll = 80.0f;        // Max overscroll pixels
+
+// Per-window scroll state
+struct SmoothScrollState {
+    float velocity = 0.0f;          // Current scroll velocity
+    float overscroll = 0.0f;        // Current overscroll amount (negative = top, positive = bottom)
+    float grab_anim = 0.0f;         // Animated scrollbar grab position
+    float alpha = 0.0f;             // Scrollbar fade
+};
+
+static std::unordered_map<ImGuiID, SmoothScrollState> g_ScrollStates;
+static float g_ScrollWheelAccum = 0.0f;
+static ImGuiID g_ActiveScrollWindow = 0;
+
+// Easing helpers
+inline float EaseOut(float current, float target, float speed, float dt) {
+    return current + (target - current) * (1.0f - std::exp(-speed * dt));
+}
+
+// Apply smooth scroll with bounce to a window
+void ApplySmoothScroll(ImGuiWindow* window, float wheel_delta, float dt)
+{
+    if (!window || window->ScrollMax.y <= 0.0f) return;
+    
+    ImGuiID id = window->ID;
+    SmoothScrollState& state = g_ScrollStates[id];
+    
+    // Add wheel input to velocity
+    if (wheel_delta != 0.0f) {
+        float input = wheel_delta * g_ScrollMultiplier * 50.0f;
+        // Reverse direction immediately if scrolling opposite way
+        if (state.velocity * input < 0.0f)
+            state.velocity = 0.0f;
+        state.velocity += input;
+    }
+    
+    // Apply velocity to scroll
+    if (std::abs(state.velocity) > 0.1f) {
+        float scroll_delta = state.velocity * dt;
+        float new_scroll = window->Scroll.y - scroll_delta;
+        
+        // Check bounds
+        if (new_scroll < 0.0f) {
+            // Only bounce if we had momentum going into the boundary
+            if (std::abs(state.velocity) > 100.0f) {
+                state.overscroll = ImClamp(new_scroll, -g_MaxOverscroll, 0.0f);
+                state.velocity *= -g_BounceStrength;
+            } else {
+                state.velocity = 0.0f;
+            }
+            new_scroll = 0.0f;
+        } else if (new_scroll > window->ScrollMax.y) {
+            if (std::abs(state.velocity) > 100.0f) {
+                state.overscroll = ImClamp(new_scroll - window->ScrollMax.y, 0.0f, g_MaxOverscroll);
+                state.velocity *= -g_BounceStrength;
+            } else {
+                state.velocity = 0.0f;
+            }
+            new_scroll = window->ScrollMax.y;
+        }
+        
+        window->Scroll.y = new_scroll;
+        
+        // Decay velocity
+        state.velocity = EaseOut(state.velocity, 0.0f, g_ScrollSmoothing, dt);
+    }
+    
+    // Return from overscroll with bounce
+    if (std::abs(state.overscroll) > 0.1f) {
+        state.overscroll = EaseOut(state.overscroll, 0.0f, g_BounceDecay, dt);
+    } else {
+        state.overscroll = 0.0f;
+    }
+}
+
+// Custom smooth scrollbar renderer with bounce effect
+void RenderSmoothScrollbar(ImGuiWindow* window)
+{
+    ImGuiContext& g = *GImGui;
+    const ImGuiStyle& style = g.Style;
+    
+    if (window->ScrollMax.y <= 0.0f) return;
+    
+    SmoothScrollState& state = g_ScrollStates[window->ID];
+    
+    // Scrollbar rect - use InnerRect to stay inside window content area
+    float scrollbar_width = style.ScrollbarSize;
+    float padding = 4.0f;
+    ImRect bb(
+        window->InnerRect.Max.x + padding,
+        window->InnerRect.Min.y,
+        window->InnerRect.Max.x + padding + scrollbar_width - padding * 2,
+        window->InnerRect.Max.y
+    );
+    float scrollbar_height = bb.GetHeight();
+    
+    if (scrollbar_height <= 0.0f) return;
+    
+    // Calculate grab size
+    float win_size = window->InnerRect.GetHeight();
+    float content_size = window->ContentSize.y + style.WindowPadding.y * 2.0f;
+    float grab_size_norm = ImClamp(win_size / content_size, 0.05f, 1.0f);
+    float grab_size_pixels = ImMax(scrollbar_height * grab_size_norm, style.GrabMinSize);
+    
+    // Calculate grab position with overscroll effect
+    float scroll_ratio = ImSaturate(window->Scroll.y / window->ScrollMax.y);
+    float grab_pos_target = scroll_ratio * (scrollbar_height - grab_size_pixels);
+    
+    // Apply overscroll to grab position (compress at edges)
+    float overscroll_offset = state.overscroll * 0.3f;
+    grab_pos_target = ImClamp(grab_pos_target - overscroll_offset, 0.0f, scrollbar_height - grab_size_pixels);
+    
+    // Animate grab position
+    state.grab_anim = EaseOut(state.grab_anim, grab_pos_target, 15.0f, g.IO.DeltaTime);
+    state.alpha = EaseOut(state.alpha, 1.0f, 8.0f, g.IO.DeltaTime);
+    
+    // Grab rect with padding
+    float grab_padding = 2.0f;
+    ImRect grab_rect(
+        bb.Min.x + grab_padding,
+        bb.Min.y + state.grab_anim,
+        bb.Max.x - grab_padding,
+        bb.Min.y + state.grab_anim + grab_size_pixels
+    );
+    
+    // Clamp grab rect to scrollbar bounds
+    grab_rect.Min.y = ImMax(grab_rect.Min.y, bb.Min.y);
+    grab_rect.Max.y = ImMin(grab_rect.Max.y, bb.Max.y);
+    
+    // Colors
+    bool hovered = bb.Contains(g.IO.MousePos);
+    float hover_alpha = hovered ? 1.0f : 0.7f;
+    ImU32 bg_col = ImGui::GetColorU32(ImGuiCol_ScrollbarBg, state.alpha * 0.3f);
+    ImU32 grab_col = ImGui::GetColorU32(ImGuiCol_ScrollbarGrab, state.alpha * hover_alpha);
+    
+    // Draw
+    ImDrawList* draw_list = window->DrawList;
+    draw_list->AddRectFilled(bb.Min, bb.Max, bg_col, style.ScrollbarRounding);
+    draw_list->AddRectFilled(grab_rect.Min, grab_rect.Max, grab_col, 4.0f);
+}
 
 // Data
 static LPDIRECT3D9              g_pD3D = nullptr;
@@ -141,31 +283,6 @@ int main(int, char**)
         ImGui_ImplDX9_NewFrame();
         ImGui_ImplWin32_NewFrame();
 
-        // Apply smooth scrolling (MUST be before ImGui::NewFrame())
-        // Add accumulated wheel input to scroll energy
-        if (g_ScrollWheelAccum != 0.0f)
-        {
-            float wheel_input = g_ScrollWheelAccum * g_ScrollMultiplier;
-            // Immediately stop if direction changes
-            if (g_ScrollEnergy.y * wheel_input < 0.0f)
-                g_ScrollEnergy.y = 0.0f;
-            g_ScrollEnergy.y += wheel_input;
-            g_ScrollWheelAccum = 0.0f;
-        }
-
-        // Apply smooth scrolling decay
-        ImVec2 scroll_now = ImVec2(0.0f, 0.0f);
-        if (std::abs(g_ScrollEnergy.y) > 0.01f)
-        {
-            scroll_now.y = g_ScrollEnergy.y * io.DeltaTime * g_ScrollSmoothing;
-            g_ScrollEnergy.y -= scroll_now.y;
-        }
-        else
-        {
-            g_ScrollEnergy.y = 0.0f;
-        }
-        io.AddMouseWheelEvent(0.0f, scroll_now.y);
-
         ImGui::NewFrame();
 
         // Scroll Test Window
@@ -174,12 +291,27 @@ int main(int, char**)
             ImVec2 window_pos((io.DisplaySize.x - window_size.x) * 0.5f, (io.DisplaySize.y - window_size.y) * 0.5f);
             ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always);
             ImGui::SetNextWindowSize(window_size, ImGuiCond_Always);
-            ImGui::Begin("Scroll Tester", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-            ImGui::Text("Scroll Energy: %.2f", g_ScrollEnergy.y);
+            ImGui::Begin("Scroll Tester", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+            
+            ImGuiWindow* window = ImGui::GetCurrentWindow();
+            SmoothScrollState& scroll_state = g_ScrollStates[window->ID];
+            
+            ImGui::Text("Velocity: %.2f", scroll_state.velocity);
+            ImGui::Text("Overscroll: %.2f", scroll_state.overscroll);
             ImGui::Text("FPS: %.1f", io.Framerate);
             ImGui::Separator();
+            
             for (int i = 1; i <= 1000; i++)
                 ImGui::Text("Tester %d", i);
+            
+            // Apply smooth scroll with bounce
+            float wheel = g_ScrollWheelAccum;
+            g_ScrollWheelAccum = 0.0f;
+            ApplySmoothScroll(window, wheel, io.DeltaTime);
+            
+            // Render custom scrollbar
+            RenderSmoothScrollbar(window);
+            
             ImGui::End();
         }
 
